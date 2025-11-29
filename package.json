@@ -1,0 +1,21 @@
+{
+  "name": "ecommerce-ecosystem",
+  "version": "1.0.0",
+  "description": "Comprehensive E-commerce Platform with Customer, Picker, Rider and Admin Applications",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\" \"npm run picker\" \"npm run rider\" \"npm run admin\"",
+    "server": "cd server && npm run dev",
+    "client": "cd client && npm start",
+    "picker": "cd picker-app && npm start",
+    "rider": "cd rider-app && npm start",
+    "admin": "cd admin-dashboard && npm start",
+    "install-all": "npm install && cd server && npm install && cd ../client && npm install && cd ../picker-app && npm install && cd ../rider-app && npm install && cd ../admin-dashboard && npm install"
+  },
+  "keywords": ["ecommerce", "marketplace", "logistics", "inventory", "delivery"],
+  "author": "Your Name",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

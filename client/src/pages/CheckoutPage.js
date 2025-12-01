@@ -49,7 +49,7 @@ const CheckoutPage = () => {
   const loading = useSelector(selectCreateOrderLoading);
   
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState('cod');
-  const [useDefaultAddress, setUseDefaultAddress] = useState(true);
+  const [useDefaultAddress, setUseDefaultAddress] = useState(!!user?.address);
 
   const {
     register,
@@ -89,10 +89,14 @@ const CheckoutPage = () => {
         ...data
       };
 
+      console.log('Submitting order:', orderData);
+      console.log('Cart items:', cartItems);
+      
       const order = await dispatch(createOrder(orderData)).unwrap();
       dispatch(clearCart());
       navigate(`/orders/${order._id}`);
     } catch (error) {
+      console.error('Order submission error:', error);
       // Error is handled in the slice
     }
   };

@@ -8,6 +8,7 @@ import { setupSocketConnection } from './store/slices/socketSlice';
 // Layout Components
 import Navbar from './components/layout/Navbar';
 import Footer from './components/layout/Footer';
+import CartSidebar from './components/cart/CartSidebar';
 import LoadingSpinner from './components/common/LoadingSpinner';
 
 // Page Components
@@ -54,6 +55,7 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <Navbar />
+      <CartSidebar />
       
       <main className="flex-grow">
         <AnimatePresence mode="wait">

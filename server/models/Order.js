@@ -210,8 +210,8 @@ orderSchema.index({ picker: 1 });
 orderSchema.index({ rider: 1 });
 orderSchema.index({ createdAt: -1 });
 
-// Generate order number
-orderSchema.pre('save', function(next) {
+// Generate order number before validation
+orderSchema.pre('validate', function(next) {
   if (!this.orderNumber) {
     const timestamp = Date.now().toString();
     const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');

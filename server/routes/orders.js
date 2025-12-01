@@ -16,12 +16,14 @@ router.post('/', auth, [
   body('items.*.quantity').isInt({ min: 1 }).withMessage('Quantity must be at least 1'),
   body('deliveryAddress.street').trim().notEmpty().withMessage('Street address is required'),
   body('deliveryAddress.city').trim().notEmpty().withMessage('City is required'),
+  body('deliveryAddress.state').trim().notEmpty().withMessage('State is required'),
   body('deliveryAddress.zipCode').trim().notEmpty().withMessage('ZIP code is required'),
   body('paymentMethod').isIn(['card', 'upi', 'wallet', 'cod']).withMessage('Invalid payment method')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.error('Validation errors:', errors.array());
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
@@ -30,6 +32,13 @@ router.post('/', auth, [
     }
 
     const { items, deliveryAddress, paymentMethod, customerNotes, specialInstructions } = req.body;
+
+    console.log('Creating order with data:', {
+      customerId: req.user.userId,
+      itemsCount: items.length,
+      deliveryAddress,
+      paymentMethod
+    });
 
     // Validate products and calculate pricing
     let subtotal = 0;
@@ -84,7 +93,8 @@ router.post('/', auth, [
         tax,
         deliveryFee,
         total
-      }
+      },
+      orderStatus: 'confirmed' // Auto-confirm order for immediate picking
     });
 
     await order.save();
@@ -95,35 +105,141 @@ router.post('/', auth, [
       await order.save();
     }
 
-    // Create notification for admin
-    await Notification.createAndSend({
-      recipient: req.user.userId, // Will be changed to admin in production
-      type: 'order_placed',
-      title: 'New Order Placed',
-      message: `Order ${order.orderNumber} has been placed`,
-      data: { orderId: order._id },
-      priority: 'medium'
-    }, req.io);
+    // Create notification for admin (non-blocking)
+    try {
+      await Notification.createAndSend({
+        recipient: req.user.userId,
+        type: 'order_placed',
+        title: 'New Order Placed',
+        message: `Order ${order.orderNumber} has been placed`,
+        data: { orderId: order._id },
+        priority: 'medium'
+      }, req.io);
+    } catch (notifError) {
+      console.error('Notification creation failed (non-critical):', notifError.message);
+    }
 
-    // Emit real-time notification
-    req.io.to('admin').emit('new-order', {
-      orderId: order._id,
-      orderNumber: order.orderNumber,
-      customer: req.currentUser.name,
-      total: order.pricing.total,
-      itemsCount: order.items.length
-    });
+    // Send notifications to all pickers about new order
+    try {
+      const pickers = await User.find({ role: 'picker', isActive: true });
+      for (const picker of pickers) {
+        await Notification.createAndSend({
+          recipient: picker._id,
+          type: 'order_placed',
+          title: '🛒 New Order to Pick',
+          message: `Order ${order.orderNumber} needs picking - ${order.items.length} items`,
+          data: { 
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            itemsCount: order.items.length
+          },
+          priority: 'high',
+          actionRequired: true
+        }, req.io);
+      }
+
+      // Emit real-time notification to pickers room
+      if (req.io) {
+        req.io.to('pickers').emit('new-order-for-picking', {
+          orderId: order._id,
+          orderNumber: order.orderNumber,
+          customer: req.currentUser.name,
+          itemsCount: order.items.length,
+          items: orderItems.map(item => ({
+            productId: item.product,
+            quantity: item.quantity
+          })),
+          createdAt: order.createdAt
+        });
+      }
+    } catch (pickerNotifError) {
+      console.error('Picker notification failed (non-critical):', pickerNotifError.message);
+    }
+
+    // Send notifications to all riders about new order (for awareness)
+    try {
+      const riders = await User.find({ role: 'rider', isActive: true });
+      for (const rider of riders) {
+        await Notification.createAndSend({
+          recipient: rider._id,
+          type: 'order_placed',
+          title: '📦 New Order Incoming',
+          message: `Order ${order.orderNumber} placed - Delivery to ${deliveryAddress.city}`,
+          data: { 
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            deliveryAddress: {
+              street: deliveryAddress.street,
+              city: deliveryAddress.city,
+              state: deliveryAddress.state,
+              zipCode: deliveryAddress.zipCode,
+              landmark: deliveryAddress.landmark,
+              contactPhone: deliveryAddress.contactPhone
+            }
+          },
+          priority: 'medium'
+        }, req.io);
+      }
+
+      // Emit real-time notification to riders room
+      if (req.io) {
+        req.io.to('riders').emit('new-order-incoming', {
+          orderId: order._id,
+          orderNumber: order.orderNumber,
+          deliveryAddress: {
+            street: deliveryAddress.street,
+            city: deliveryAddress.city,
+            state: deliveryAddress.state,
+            zipCode: deliveryAddress.zipCode,
+            landmark: deliveryAddress.landmark,
+            contactPhone: deliveryAddress.contactPhone
+          },
+          estimatedDeliveryTime: order.estimatedDeliveryTime,
+          total: order.pricing.total,
+          paymentMethod: order.paymentMethod
+        });
+      }
+    } catch (riderNotifError) {
+      console.error('Rider notification failed (non-critical):', riderNotifError.message);
+    }
+
+    // Emit real-time notification to admin
+    try {
+      if (req.io && req.currentUser) {
+        req.io.to('admin').emit('new-order', {
+          orderId: order._id,
+          orderNumber: order.orderNumber,
+          customer: req.currentUser.name,
+          total: order.pricing.total,
+          itemsCount: order.items.length
+        });
+      }
+    } catch (socketError) {
+      console.error('Socket emit failed (non-critical):', socketError.message);
+    }
+
+    // Populate and return order
+    const populatedOrder = await order.populate('items.product', 'name images price');
 
     res.status(201).json({
       success: true,
       message: 'Order placed successfully',
-      order: await order.populate('items.product', 'name images price')
+      order: populatedOrder
     });
   } catch (error) {
     console.error('Create order error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+    
+    // Return more specific error message
+    const errorMessage = error.message || 'Server error creating order';
     res.status(500).json({
       success: false,
-      message: 'Server error creating order'
+      message: errorMessage,
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -359,6 +475,59 @@ router.post('/:orderId/items/:itemIndex/picked', auth, isPicker, [
       const picker = await User.findById(req.user.userId);
       picker.pickerDetails.totalItemsPicked += 1;
       await picker.save();
+
+      // Notify all riders that order is ready for pickup
+      try {
+        const riders = await User.find({ role: 'rider', isActive: true });
+        for (const rider of riders) {
+          await Notification.createAndSend({
+            recipient: rider._id,
+            type: 'order_ready',
+            title: '📦 Order Ready for Pickup',
+            message: `Order ${order.orderNumber} is picked and ready in bin - Deliver to ${order.deliveryAddress.city}`,
+            data: { 
+              orderId: order._id,
+              orderNumber: order.orderNumber,
+              binLocation: binId,
+              deliveryAddress: order.deliveryAddress
+            },
+            priority: 'high',
+            actionRequired: true
+          }, req.io);
+        }
+
+        // Emit real-time notification to riders
+        if (req.io) {
+          req.io.to('riders').emit('order-ready-for-pickup', {
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            binId: binId,
+            deliveryAddress: order.deliveryAddress,
+            total: order.pricing.total,
+            paymentMethod: order.paymentMethod,
+            deliveryOTP: order.deliveryOTP
+          });
+        }
+      } catch (riderNotifError) {
+        console.error('Rider notification failed (non-critical):', riderNotifError.message);
+      }
+
+      // Notify customer that order is picked and ready for delivery
+      await Notification.createAndSend({
+        recipient: order.customer,
+        type: 'order_ready',
+        title: '✅ Order Picked & Ready',
+        message: `Your order ${order.orderNumber} has been picked and will be delivered soon!`,
+        data: { orderId: order._id },
+        priority: 'high'
+      }, req.io);
+
+      // Emit to customer
+      req.io.to(`customer-${order.customer}`).emit('order-update', {
+        orderId: order._id,
+        status: 'picked',
+        message: 'Your order is picked and ready for delivery'
+      });
     }
 
     await order.save();
@@ -477,15 +646,30 @@ router.post('/:id/pickup', auth, isRider, async (req, res) => {
 
     await order.save();
 
-    // Create notification for customer
+    // Notify customer
     await Notification.createAndSend({
       recipient: order.customer,
       type: 'out_for_delivery',
-      title: 'Order Out for Delivery',
-      message: `Your order ${order.orderNumber} is out for delivery`,
+      title: '🚚 Order Out for Delivery',
+      message: `Your order ${order.orderNumber} is on its way!`,
       data: { orderId: order._id },
       priority: 'high'
     }, req.io);
+
+    // Emit to customer
+    req.io.to(`customer-${order.customer}`).emit('order-update', {
+      orderId: order._id,
+      status: 'out_for_delivery',
+      message: 'Your order is out for delivery'
+    });
+
+    // Notify admin
+    req.io.to('admin').emit('order-update', {
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+      status: 'out_for_delivery',
+      rider: req.currentUser.name
+    });
 
     res.json({
       success: true,
@@ -528,6 +712,7 @@ router.post('/:id/deliver', auth, isRider, [
     order.orderStatus = 'delivered';
     order.deliveredAt = new Date();
     order.deliveryNotes = deliveryNotes;
+    order.paymentStatus = 'paid'; // Mark as paid when delivered
 
     // Update rider stats
     const rider = await User.findById(req.user.userId);
@@ -536,15 +721,30 @@ router.post('/:id/deliver', auth, isRider, [
 
     await order.save();
 
-    // Create notification for customer
+    // Notify customer
     await Notification.createAndSend({
       recipient: order.customer,
       type: 'delivered',
-      title: 'Order Delivered',
-      message: `Your order ${order.orderNumber} has been delivered successfully`,
+      title: '🎉 Order Delivered Successfully!',
+      message: `Your order ${order.orderNumber} has been delivered. Thank you for shopping!`,
       data: { orderId: order._id },
       priority: 'high'
     }, req.io);
+
+    // Emit to customer
+    req.io.to(`customer-${order.customer}`).emit('order-update', {
+      orderId: order._id,
+      status: 'delivered',
+      message: 'Your order has been delivered successfully'
+    });
+
+    // Notify admin
+    req.io.to('admin').emit('order-delivered', {
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+      rider: req.currentUser.name,
+      deliveredAt: order.deliveredAt
+    });
 
     res.json({
       success: true,
